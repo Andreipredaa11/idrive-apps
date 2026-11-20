@@ -116,7 +116,10 @@ void MapFeed::make_layer()
     /* The map area: all of the map slot's scene, the centred 1088x480 of a
      * whole-panel one, a fitted centre on the HUD. */
     crk::QuadRect q = quad(tw, th);
-    if (cfg_.rect.set() && cfg_.rect.fits(tw, th))
+    if (cfg_.panel.set() && !hosted())
+        q = cfg_.panel.fits(tw, th) ? crk::QuadRect{cfg_.panel.x, cfg_.panel.y, cfg_.panel.w, cfg_.panel.h}
+                                    : crk::QuadRect{0, 0, tw, th};
+    else if (cfg_.rect.set() && cfg_.rect.fits(tw, th))
         q = crk::QuadRect{cfg_.rect.x, cfg_.rect.y, cfg_.rect.w, cfg_.rect.h};
     else if (cfg_.rect.set())
         log_warn("render: map_rect %u,%u,%u,%u is outside %s (%ux%u); the map area instead", cfg_.rect.x,
@@ -164,6 +167,37 @@ void MapFeed::make_layer()
             part_ = OutputPart{crop.x, crop.y, crop.w, crop.h, dw, dh};
         log_info("render: hosted by a scene on %s: the map's %ux%u at %u,%u, as %ux%u%s", host_.into.c_str(), crop.w,
                  crop.h, crop.x, crop.y, dw, dh, part_.set() ? ", made by VPP (hosted_vpp_scale)" : "");
+    } else if (cfg_.panel.set() && cfg_.video.w && cfg_.video.h) {
+        /* On the panel: the middle of the picture in the rect's shape (a
+         * multiple of 4 each way, as the renderer and packed motion need),
+         * cut out on the head unit at the picture's own size, and stretched
+         * over the rect by the renderer. */
+        uint32_t cw = cfg_.video.w & ~3u;
+        uint32_t ch = (uint32_t)(((uint64_t)cw * q.h / q.w) & ~3u);
+        if (ch > cfg_.video.h) {
+            ch = cfg_.video.h & ~3u;
+            cw = (uint32_t)(((uint64_t)ch * q.w / q.h) & ~3u);
+        }
+        if (cw < 64 || ch < 32) {
+            refused_ = "the picture is too small for the panel's rect";
+            log_error("render: %s", refused_.c_str());
+            return;
+        }
+        vo.w = cw;
+        vo.h = ch;
+        scaling_ = true;
+        shape_ = ScaleShape();
+        shape_.w = cfg_.video.w;
+        shape_.h = cfg_.video.h;
+        shape_.dw = cw;
+        shape_.dh = ch;
+        shape_.crop_x = (cfg_.video.w - cw) / 2;
+        shape_.crop_y = (cfg_.video.h - ch) / 2;
+        shape_.crop_w = cw;
+        shape_.crop_h = ch;
+        shape_.level_bits = cfg_.scaled_level_bits;
+        log_info("render: on the panel: the picture's middle %ux%u at %u,%u, stretched over %ux%u at %u,%u", cw, ch,
+                 shape_.crop_x, shape_.crop_y, q.w, q.h, q.x, q.y);
     } else if (cfg_.target == "hud" && cfg_.scale_down && (sw < cfg_.video.w || sh < cfg_.video.h) && sw >= 64 &&
                sh >= 32 && sw <= cfg_.video.w && sh <= cfg_.video.h) {
         q.x += (q.w - sw) / 2;
@@ -206,6 +240,8 @@ void MapFeed::make_layer()
     lo_.contend = !hosted();
     lo_.guide_hold = cfg_.guide_hold;
     lo_.yield = hosted() || cfg_.target != "hud" || !cfg_.hud_keep_shown;
+    if (cfg_.panel.set() && !hosted())
+        lo_.z = kPanelZ;
     lo_.x = (int)q.x;
     lo_.y = (int)q.y;
     lo_.w = q.w;
@@ -563,6 +599,16 @@ FeedStatus MapFeed::status(const std::string &decode, const std::string &stream)
     FeedStatus s;
     s.target = drawn_target();
     s.hosted = hosted();
+    if (cfg_.panel.set() && !hosted()) {
+        uint32_t tw = 0, th = 0;
+        const MapRect &p = cfg_.panel;
+        if (!target_size(client_.targets, "panel", &tw, &th))
+            tw = 1920, th = 720;
+        if (p.x == 0 && p.y == 0 && p.w >= tw && p.h >= th)
+            s.full = true;
+        else
+            s.window = std::to_string(p.x) + "," + std::to_string(p.y) + "," + std::to_string(p.w) + "," + std::to_string(p.h);
+    }
     s.hud_width_pct = cfg_.hud_width_pct;
     s.hud_offset_x = placed_x_;
     s.hud_keep_shown = cfg_.hud_keep_shown;

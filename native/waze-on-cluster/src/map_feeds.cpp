@@ -58,6 +58,30 @@ void MapFeeds::follow()
     }
 }
 
+void MapFeeds::set_panel(const MapRect *rect)
+{
+    const MapRect next = rect ? *rect : MapRect();
+    const MapRect &was = base_.panel;
+    if (next.x == was.x && next.y == was.y && next.w == was.w && next.h == was.h)
+        return;
+    base_.panel = next;
+    base_.target = next.set() ? "panel" : "map";
+    if (cluster_) {
+        /* the old layer's newest picture goes first on the new one, so the
+         * map never shows an older one or a blank while it moves */
+        std::unique_ptr<MapFeed> next(new MapFeed(base_));
+        next->set_stream(live_, frozen_, picture_);
+        if (cluster_->latest(&copy_))
+            next->hold(&copy_, id_);
+        cluster_ = std::move(next);
+        copy_ = std::vector<uint8_t>();
+    }
+    if (next.set())
+        log_info("cluster: on the panel at %u,%u %ux%u", next.x, next.y, next.w, next.h);
+    else
+        log_info("cluster: in the map area");
+}
+
 void MapFeeds::set_cluster(bool on)
 {
     cluster_on_ = on;

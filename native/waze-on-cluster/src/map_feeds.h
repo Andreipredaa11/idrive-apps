@@ -66,6 +66,10 @@ public:
     int hud_offset_y() const { return base_.hud_offset_y; }
     /* The cluster map layer's guide_hold. */
     void set_guide_hold(bool hold);
+    /* The cluster's map on the panel at rect (full_request.h: the whole
+     * panel, or a layout's window), or with null in the map area: its feed
+     * made again there, from its newest picture. */
+    void set_panel(const MapRect *rect);
 
     /* For poll(): one entry per feed, appended. */
     size_t poll_fds(std::vector<pollfd> *fds) const;

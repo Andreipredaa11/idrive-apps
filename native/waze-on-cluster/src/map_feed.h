@@ -111,7 +111,18 @@ struct FeedConfig {
      * and height are multiples of 4; else as pan_blocks decides, with one
      * log line */
     bool always_packed = false;
+    /* On the panel (full_request.h): set, the cluster's feed on the panel
+     * target (over the stock gauges) at this rect, above other apps' content
+     * there (z kPanelZ), the picture's middle cut to the rect's shape on the
+     * head unit and stretched over the rect by the renderer: the whole
+     * panel for an app's full-cluster ask, a layout's map window otherwise.
+     * map_rect does not apply. */
+    MapRect panel;
 };
+
+/* The map's z on the panel: over every content layer of a layout (Cluster
+ * Layouts' are -210 to 20); a layout's overlay-class layers stay above it. */
+const int kPanelZ = 900;
 
 /* The status the app shows (its render socket's "status" event), with
  * the shared upload cap and why it is what it is, for the diagnostics. */
@@ -119,6 +130,8 @@ struct FeedStatus {
     std::string state = "idle";   /* idle, starting, showing, frozen, error */
     std::string target;           /* where the map is drawn: the host's target while hosted */
     bool hosted = false;          /* inside another app's scene (MapFeed, "Hosted") */
+    bool full = false;            /* on the panel, over the whole of it (full_request.h) */
+    std::string window;           /* on the panel in a layout's window "X,Y,W,H"; empty: not */
     std::string page;
     std::string reason;
     bool stream_reason = false;   /* the reason is the stream's (MapFeed::status) */

@@ -569,6 +569,78 @@ static void hosting()
     (void)removed;
 }
 
+/* Full cluster (FeedConfig::full): the cluster's map on the panel, over the
+ * stock gauges, its layer the whole panel, its frames the picture's middle
+ * in the panel's shape (1088x408 of 1088x480: 36 rows off the top and the
+ * bottom), map_rect not applying; the map slot let go. Back in the map
+ * area, the whole picture on the map target again. */
+static void full_cluster()
+{
+    const std::vector<uint8_t> f = atlas(5), f2 = atlas(6);
+    Rig r;
+    /* the worker cuts the frames on a thread of its own, in real time: pumped
+     * (with a real pause) until the panel draws that picture, 3 s at most */
+    auto settle = [&r](const std::vector<uint8_t> &frame, const std::vector<uint8_t> &want) {
+        bool with = false;
+        for (int i = 0; i < 300 && !(r.drawing("panel", want, &with) && with && r.st().state == "showing"); i++) {
+            r.pump(20, &frame);
+            usleep(10000);
+        }
+        return with;
+    };
+    r.pump(2000, &f);
+    ok("full cluster: first the map on its own target", r.st().state == "showing" && r.st().target == "map" && !r.st().full);
+
+    FeedConfig fc;
+    fc.socket = r.path;
+    fc.video.level_bits = 0;
+    fc.scaled_level_bits = 0;
+    fc.rect = MapRect{272, 120, 544, 240};   /* not applying in full */
+    fc.panel = MapRect{0, 0, 1920, 720};
+    fc.target = "panel";
+    r.feed.reset(new MapFeed(fc));
+    r.feed->set_stream(true, false, Picture::Shown);
+    r.pump(2500, &f);
+    const bool first = settle(f, crop_of(f, 0, 36, 1088, 408));
+    bool with = false;
+    const crs::Layer *l = r.map_layer();
+    const int map_i = r.svc->slots().index("map");
+    ok("full cluster: one contending content layer over the whole panel (0,0 1920x720, z 900), map_rect left aside",
+       l && l->params.rect.x == 0 && l->params.rect.y == 0 && l->params.rect.w == 1920 && l->params.rect.h == 720 &&
+           l->params.z == kPanelZ &&
+           l->params.contend && l->params.klass == crs::Klass::Content && r.svc->compositor().layers().size() == 1);
+    ok("full cluster: showing on the panel, its frames the picture's middle 1088x408, the map's slot released",
+       r.st().state == "showing" && r.st().target == "panel" && r.st().full && !r.st().hosted &&
+           first && r.svc->slots().status(map_i).state == crs::TargetState::Idle);
+    r.pump(1500, &f2);
+    ok("full cluster: a new picture's middle follows", settle(f2, crop_of(f2, 0, 36, 1088, 408)));
+    ok("full cluster: the status says full, no window", r.st().full && r.st().window.empty());
+
+    /* A layout's window, taller than the map's shape (600x360 at 660,180):
+     * the picture's middle 800x480 (144 columns off each side) stretched
+     * over it, the status naming the window, not full. */
+    fc.panel = MapRect{660, 180, 600, 360};
+    r.feed.reset(new MapFeed(fc));
+    r.feed->set_stream(true, false, Picture::Shown);
+    r.pump(2500, &f);
+    const bool in_window = settle(f, crop_of(f, 144, 0, 800, 480));
+    const crs::Layer *wl = r.map_layer();
+    ok("layout window: the layer at the window (660,180 600x360, z 900), the picture's middle 800x480 in it",
+       in_window && wl && wl->params.rect.x == 660 && wl->params.rect.y == 180 && wl->params.rect.w == 600 &&
+           wl->params.rect.h == 360 && wl->params.z == kPanelZ);
+    ok("layout window: the status names the window, not full", !r.st().full && r.st().window == "660,180,600,360" &&
+                                                                  r.st().target == "panel");
+
+    fc.panel = MapRect();
+    fc.target = "map";
+    fc.rect = MapRect();
+    r.feed.reset(new MapFeed(fc));
+    r.feed->set_stream(true, false, Picture::Shown);
+    r.pump(2500, &f2);
+    ok("back in the map area: the whole picture on the map target, not full",
+       r.st().state == "showing" && r.st().target == "map" && !r.st().full && r.drawing("map", f2, &with) && with);
+}
+
 /* hosted_vpp_scale on (FeedConfig::vpp_scale): hosted, the feed asks the
  * decoder for the host's part at the size it is shown at; whole frames that
  * come meanwhile go through the worker, a frame of the part goes as it is,
@@ -963,6 +1035,7 @@ int main()
     always_packed_map();
     old_renderer();
     renderer_changed();
+    full_cluster();
     Rig r;
     r.pump(100);
     const crs::Layer *l = r.map_layer();

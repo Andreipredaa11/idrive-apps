@@ -30,6 +30,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <sys/signalfd.h>
+#include <time.h>
 #include <unistd.h>
 #include <vector>
 
@@ -44,6 +45,7 @@
 #include "map_feed.h"
 #include "map_feeds.h"
 #include "map_geometry.h"
+#include "full_request.h"
 #include "map_state.h"
 #include "refused.h"
 #include "video_producer.h"
@@ -67,6 +69,14 @@ namespace {
  * This version does not read it. */
 const char kUnreadLocalConf[] = "/var/opt/waze-on-cluster/waze-on-cluster.local.conf";
 
+/* The wall clock in ms: the full-cluster request file's change time is one. */
+int64_t wall_ms()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
 std::string status_line(const FeedStatus &s)
 {
     return "{\"ev\":\"status\",\"state\":" + json_escape(s.state) + ",\"target\":" + json_escape(s.target) +
@@ -80,8 +90,9 @@ std::string status_line(const FeedStatus &s)
            ",\"hud_width_pct\":" + std::to_string(s.hud_width_pct) +
            ",\"hud_x\":" + std::to_string(s.hud_offset_x) + ",\"hud_y\":" + std::to_string(s.hud_offset_y) +
            ",\"hud_keep_shown\":" + (s.hud_keep_shown ? "1" : "0") +
-           /* only while hosted: otherwise the line is as it always was */
-           (s.hosted ? ",\"hosted\":1" : "") + "}";
+           /* only while hosted or full: otherwise the line is as it always was */
+           (s.hosted ? ",\"hosted\":1" : "") + (s.full ? ",\"full\":1" : "") +
+           (s.window.empty() ? "" : ",\"window\":" + json_escape(s.window)) + "}";
 }
 
 class Server : public Control::Handler {
@@ -209,7 +220,7 @@ int serve(Config cfg)
         {"freeze_ms", 0, 600000},   {"freeze_min_fps", 1, 60},       {"alt_screen_port", 0, 65535},
         {"idle_ms", 1000, 600000},  {"blank_ms", 1000, 600000},
         {"alt_screen_uid", 0, 4294967294L}, {"gpu_copy", 0, 1},   {"hosted_vpp_scale", 0, 1},
-        {"always_packed", 0, 1}};
+        {"always_packed", 0, 1},    {"full_request_stale_ms", 500, 10000}};
     for (const Range &r : ranges)
         if (cfg.num(r.key) < r.lo || cfg.num(r.key) > r.hi) {
             log_error("%s must be from %ld to %ld", r.key, r.lo, r.hi);
@@ -293,6 +304,15 @@ int serve(Config cfg)
         return 1;
     }
 
+    FullRequest full_request(cfg.str("full_request_file"), cfg.num("full_request_stale_ms"));
+    LayoutWindow layout_window(cfg.str("layout_window_file"));
+    MapRect whole_panel;
+    whole_panel.w = 1920;
+    whole_panel.h = 720;
+    if (!cfg.str("full_request_file").empty())
+        log_info("full cluster: an app may ask through %s (stale after %ld ms)", cfg.str("full_request_file").c_str(),
+                 cfg.num("full_request_stale_ms"));
+
     std::vector<uint8_t> frame;
     StatusLog status_log;
     int64_t last_status_write = 0;
@@ -345,6 +365,14 @@ int serve(Config cfg)
         producer.set_live(live, now);
         producer.set_pictures(feed.wants_frames());
         feed.set_stream(live, producer.frozen(now), producer.picture(now));
+        {
+            /* a layout's map window first, then an app's full-cluster ask, else the map area */
+            const int64_t wall = wall_ms();
+            MapRect window;
+            const bool in_window = layout_window.read(wall, &window);
+            const bool full = full_request.wanted(wall);
+            feed.set_panel(in_window ? &window : full ? &whole_panel : nullptr);
+        }
         feed.poll(now);
         if (fc.vpp_scale)
             producer.set_part(feed.part());
@@ -487,6 +515,9 @@ void define_keys(Config *cfg)
     cfg->define("gpu_copy", "1");
     cfg->define("hosted_vpp_scale", "0");
     cfg->define("always_packed", "0");
+    cfg->define("full_request_file", "/dev/shm/full-cluster/request.json");
+    cfg->define("full_request_stale_ms", "1500");
+    cfg->define("layout_window_file", "/dev/shm/cluster-info/map_window.txt");
     cfg->define("hide_bmw_guidance", "1");
     cfg->define("state_file", "/var/opt/waze-on-cluster/state/waze-on-cluster.state.conf");
     cfg->define("map_state_file", "/var/opt/waze-on-cluster/map.state.conf");

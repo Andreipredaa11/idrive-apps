@@ -225,6 +225,43 @@ Not yet measured on a car: the unit's VPP with a part, the packed picture
 and the CPU and GPU cost. `waze-on-cluster.conf` has the details for each
 key.
 
+### Full cluster
+
+An app can ask for the cluster map over the **whole cluster** (cluster-render's
+`panel` target, 1920x720, over the stock gauges and under the warning lights)
+instead of the map area between the gauges. While it asks, the middle of the
+picture in the panel's shape (1088x408 of the 1088x480 map, 36 rows off the
+top and bottom, where CarPlay keeps its guidance inside the safe area) is cut
+out on the head unit and stretched over the panel by the renderer; the map
+slot is let go, and `map_rect` does not apply. The status line has `"full":1`
+then.
+
+The map covers the stock speedometer there, so the asking app must draw the
+speed (and whatever else it wants) itself, on the panel's `overlay` class, and
+the ask lasts only as long as that app is alive: it rewrites
+`full_request_file` (`/dev/shm/full-cluster/request.json`, by rename) at
+least every second while its own readings are drawn, with
+
+```json
+{"v":1,"full":1,"app":"acme_full_cluster"}
+```
+
+The tool looks at the file at most every 250 ms. Once it has not changed for
+`full_request_stale_ms` (1.5 s), or says `"full":0`, or is not a regular
+file, the map is back in the map area, and the stock gauges show again. A
+scene that hosts the map (cluster-render "Hosting another target") comes
+first: hosted, the map is where the host puts it.
+
+**A layout's map window.** A cluster layout that leaves a window for the map
+(Cluster Layouts with its centre on Waze, ID7 Cluster Themes' Waze themes)
+keeps `layout_window_file` (`/dev/shm/cluster-info/map_window.txt`) fresh
+with one line `panel X Y W H`. While it is fresh (changed in the last
+3.5 s), the map goes to the panel at that rect, the picture's middle in its
+shape stretched over it, over the layout's content (z 900) and under its
+`overlay` class; the status line has `"window":"X,Y,W,H"` then (`"full":1`
+for the whole panel). A window comes before a full-cluster ask; a scene
+hosting the map comes before both.
+
 ### Logs
 
 For a report, use the app's **Logs** page (Maps on cluster README, "Logs
