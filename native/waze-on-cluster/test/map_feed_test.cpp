@@ -74,6 +74,8 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -94,6 +96,7 @@
 #include "src/log.h"
 #include "../src/map_feeds.h"
 #include "../src/atlas_scale.h"
+#include "../src/full_request.h"
 
 using namespace woc;
 
@@ -1026,6 +1029,124 @@ static void renderer_changed()
     }
 }
 
+/* FullRequest and LayoutWindow (full_request.h): full only while an app's
+ * fresh file says "full":1; a layout's window only while its fresh file names
+ * a usable rect on the panel; stale, from the future, malformed, not a
+ * regular file, a symlink or none: neither; looked at no more often than
+ * kCheckMs. */
+using woc::FullRequest;
+using woc::LayoutWindow;
+
+static int64_t fr_wall_now()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* The file written, its change time set to at_ms (wall clock). */
+static void put_at(const std::string &path, const std::string &content, int64_t at_ms)
+{
+    std::ofstream(path) << content;
+    struct timeval tv[2];
+    tv[0].tv_sec = tv[1].tv_sec = at_ms / 1000;
+    tv[0].tv_usec = tv[1].tv_usec = (at_ms % 1000) * 1000;
+    utimes(path.c_str(), tv);
+}
+
+static void full_request_checks()
+{
+    char tmpl[] = "/tmp/woc-full-XXXXXX";
+    const std::string dir = mkdtemp(tmpl) ? tmpl : "/tmp";
+    const std::string path = dir + "/request.json";
+    const int64_t t0 = fr_wall_now();
+    int64_t t = t0;
+    /* each check further on than kCheckMs, so the file is looked at */
+    auto next = [&]() { t += FullRequest::kCheckMs; return t; };
+
+    {
+        FullRequest none("", 1500);
+        put_at(path, "{\"v\":1,\"full\":1,\"app\":\"x\"}\n", t0);
+        ok("no file named: never full", !none.wanted(t0));
+    }
+    FullRequest r(path, 1500);
+    unlink(path.c_str());
+    ok("no file: not full", !r.wanted(next()));
+
+    put_at(path, "{\"v\":1,\"full\":1,\"app\":\"acme_full_cluster\"}\n", t);
+    ok("a fresh file with full 1: full, the app named", r.wanted(next()) && r.app() == "acme_full_cluster");
+
+    ok("1.4 s on, the same file: still full", r.wanted(t + 1400 - FullRequest::kCheckMs + 1) || r.wanted(t + 1400));
+    t += 1400;
+    put_at(path, "{\"v\":1,\"full\":1,\"app\":\"acme_full_cluster\"}\n", t);
+    ok("rewritten: full", r.wanted(next()));
+    ok("not rewritten for 1.6 s: not full any more, no app", !r.wanted(t + 1600) && r.app().empty());
+    t += 1600;
+
+    put_at(path, "{\"v\":1,\"full\":1}", t);
+    ok("written again: full, an app without a name", r.wanted(next()) && r.app() == "an app");
+    const int64_t at = t;
+    put_at(path, "{\"v\":1,\"full\":0,\"app\":\"x\"}", at);
+    ok("within kCheckMs of the last look: the last answer", r.wanted(at + 1));
+    ok("after kCheckMs: full 0 is not full", !r.wanted(next()));
+
+    put_at(path, "full please", t);
+    ok("not JSON: not full", !r.wanted(next()));
+    put_at(path, "{\"v\":1,\"app\":\"x\"}", t);
+    ok("no full: not full", !r.wanted(next()));
+    put_at(path, "{\"v\":1,\"full\":1,\"app\":\"x\"}", t + 5000);
+    ok("changed 5 s in the future (the clock set back): not full", !r.wanted(next()));
+    put_at(path, "", t);
+    ok("empty: not full", !r.wanted(next()));
+    put_at(path, std::string(2000, ' ') + "{\"full\":1}", t);
+    ok("over 1 KiB: not full", !r.wanted(next()));
+
+    unlink(path.c_str());
+    const std::string real = dir + "/real.json";
+    put_at(real, "{\"v\":1,\"full\":1,\"app\":\"x\"}", t);
+    const int linked = symlink(real.c_str(), path.c_str());
+    ok("a symlink to a fresh file: not full", linked == 0 && !r.wanted(next()));
+    unlink(path.c_str());
+    mkdir(path.c_str(), 0755);
+    ok("a directory: not full", !r.wanted(next()));
+    rmdir(path.c_str());
+
+    FullRequest quick(path, 500);
+    put_at(path, "{\"v\":1,\"full\":1,\"app\":\"x\"}", t);
+    ok("full_request_stale_ms 500: fresh, full", quick.wanted(t + 400));
+    ok("full_request_stale_ms 500: 600 ms old, not full", !quick.wanted(t + 400 + FullRequest::kCheckMs));
+
+    /* A layout's map window (LayoutWindow) */
+    const std::string win = dir + "/map_window.txt";
+    LayoutWindow lw(win);
+    MapRect r2;
+    ok("layout window: no file, none", !lw.read(next(), &r2));
+    put_at(win, "panel 0 0 1920 720\n", t);
+    ok("layout window: fresh \"panel 0 0 1920 720\": the whole panel",
+       lw.read(next(), &r2) && r2.x == 0 && r2.y == 0 && r2.w == 1920 && r2.h == 720);
+    put_at(win, "panel 660 180 600 360\n", t);
+    ok("layout window: moved: the new rect", lw.read(next(), &r2) && r2.x == 660 && r2.w == 600 && r2.h == 360);
+    put_at(win, "panel 660 180 600 360\n", t - 4000);
+    ok("layout window: 4 s old: none", !lw.read(next(), &r2));
+    put_at(win, "panel 1800 0 300 300\n", t);
+    ok("layout window: outside the panel: none", !lw.read(next(), &r2));
+    put_at(win, "panel 0 0 40 20\n", t);
+    ok("layout window: under 64x32: none", !lw.read(next(), &r2));
+    put_at(win, "hud 0 0 400 200\n", t);
+    ok("layout window: another target: none", !lw.read(next(), &r2));
+    put_at(win, "panel 0 0 400 200 extra\n", t);
+    ok("layout window: more than the rect: none", !lw.read(next(), &r2));
+    unlink(win.c_str());
+    {
+        LayoutWindow off("");
+        ok("layout window: no file named: never", !off.read(next(), &r2));
+    }
+
+    unlink(path.c_str());
+    unlink(real.c_str());
+    rmdir(dir.c_str());
+}
+
 int main()
 {
     signal(SIGPIPE, SIG_IGN);
@@ -1036,6 +1157,7 @@ int main()
     old_renderer();
     renderer_changed();
     full_cluster();
+    full_request_checks();
     Rig r;
     r.pump(100);
     const crs::Layer *l = r.map_layer();
